@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Plus harness</title>
+<style>
+  body { margin: 0; display: flex; font-family: system-ui, sans-serif; background: #1d1f27; color: #e9e9ef; }
+  #log { flex: 1; font: 11px ui-monospace, monospace; white-space: pre-wrap; padding: 8px; opacity: 0.8; }
+  #panel { width: 420px; border-left: 1px solid #444; }
+</style>
+</head>
+<body>
+<div id="log"></div>
+<div id="panel"></div>
+<script type="module">
+// Mocked Folium host + mocked OpenAI-compatible endpoint, then scripted scenarios.
+const logBox = document.getElementById('log');
+const say = (...parts) => { logBox.textContent += parts.map((p) => (typeof p === 'string' ? p : JSON.stringify(p))).join(' ') + '\n'; };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const handlers = {};
+const emit = (type, payload) => (handlers[type] ?? []).forEach((fn) => fn(payload));
+
+// visualizer store
+const state = {
+  visualizerMode: 'tilt',
+  handleSetVisualizerMode(mode) { state.visualizerMode = mode; emit('visualizer.modeChanged', { mode }); },
+  smartBeat: { mode: 'on', effects: {} },
+  handleSetSmartBeat(patch) {
+    const effects = { ...state.smartBeat.effects };
+    for (const [id, value] of Object.entries(patch.effects ?? {})) effects[id] = { ...(effects[id] ?? { on: true, strength: 1 }), ...value };
+    state.smartBeat = { mode: patch.mode ?? state.smartBeat.mode, effects };
+  },
+};
+for (const mode of ['classic', 'cadenza', 'partita', 'fume', 'claddagh', 'cappella', 'tilt', 'monet', 'diorama', 'pendolo', 'sonnet', 'tempera', 'lumiere']) {
+  const key = `${mode}Tuning`;
+  state[key] = { showGuideLines: true, staggerMin: 20, staggerMax: 80, cameraIntensity: 1, showOnlyText: false, showBackgroundMg: false };
+  state[`handleSet${mode[0].toUpperCase()}${mode.slice(1)}Tuning`] = (patch) => { state[key] = { ...state[key], ...patch }; };
+}
+const registry = ['sonnet', 'tempera', 'lumiere', 'hanabi', 'classic', 'cadenza', 'partita', 'fume', 'tilt', 'claddagh', 'monet', 'pendolo', 'cappella', 'diorama', 'still', 'mod:visualizer52hz:rings']
+  .map((mode) => ({ mode, labelFallback: mode }));
+const beatEffectsOf = { tempera: ['tempera.inkFlash'], sonnet: ['sonnet.lensTear'], pendolo: ['pendolo.drumhead', 'pendolo.gearBeats'] };
+for (const entry of registry) {
+  if (beatEffectsOf[entry.mode]) entry.beatEffects = beatEffectsOf[entry.mode].map((id) => ({ id, source: 'beats', retired: id === 'pendolo.gearBeats' }));
+}
+
+// playback
+const songA = { id: '1', source: 'netease', title: '真的吗', artist: '莫文蔚', album: '精选', ref: 'a' };
+const songB = { id: '2', source: 'netease', title: '另一首', artist: '某人', album: null, ref: 'b' };
+const mkLines = (offset) => Array.from({ length: 16 }, (_, i) => ({
+  fullText: i === 0 ? '编曲 : 伍佰' : (i % 4 < 2 ? `主歌第${i}句` : `副歌重复句${i % 2}`),
+  startTime: offset + i * 4, endTime: offset + i * 4 + 3, words: [], isChorus: false, renderHints: {},
+}));
+const play = { song: null, position: 0, duration: 200 };
+let queueSongs = [];
+let loopMode = 'off';
+let currentLines = [];
+
+// storage, secrets, fetch
+const storage = new Map();
+const secrets = new Map([['apiKey', 'sk-test-123456789']]);
+const calls = [];
+let decisionReply = { mode: 'partita', params: { staggerMax: 150, showGuideLines: false, bogus: 3 }, reason: '叙事感强，适合错落下行', confidence: 0.8 };
+let replyDelayMs = 50;
+
+const settingsValues = {};
+const folium = {
+  modId: 'lyric-ai-director-plus',
+  host: { folium: { major: 1, minor: 7 }, folia: '0.7.22' },
+  log: { info: (...a) => say('[info]', ...a), warn: (...a) => say('[warn]', ...a), error: (...a) => say('[error]', ...a) },
+  registries: new Proxy({}, { get: (_, name) => ({ register: (def) => {
+    registered[name] = registered[name] ?? [];
+    registered[name].push(def);
+    if (name === 'settingsSections') {
+      for (const f of def.settings) if (f.type !== 'secret') settingsValues[f.key] = f.defaultValue;
+      return { id: def.id, unregister() {}, settings: { get: () => ({ ...settingsValues }), set: (p) => Object.assign(settingsValues, p), onChange: () => () => {} } };
+    }
+    return { id: def.id, unregister() {} };
+  } }) }),
+  events: { on: (type, fn) => { (handlers[type] ??= []).push(fn); return () => {}; } },
+  ui: { toast: (m) => say('[toast]', m), openPlayerPanel: (id) => say('[openPanel]', id) },
+  playback: {
+    getState: () => ({ ...play, state: 'playing', liked: false, canLike: false }),
+    getLoopMode: () => loopMode,
+    getQueue: ({ offset, limit } = {}) => {
+      const cur = queueSongs.findIndex((s) => s.id === play.song?.id);
+      const start = offset ?? Math.max(0, cur);
+      return { items: queueSongs.slice(start, start + (limit ?? 500)).map((song, i) => ({ song, index: start + i })), length: queueSongs.length, currentIndex: cur, kind: 'queue', version: 'v' };
+    },
+  },
+  lyrics: { getLines: () => currentLines },
+  omni: { getLyrics: async () => ({ lines: mkLines(2), isWordByWord: false, isPureMusic: false }) },
+  storage: {
+    get: async (k) => (storage.has(k) ? JSON.parse(storage.get(k)) : undefined),
+    set: async (k, v) => { storage.set(k, JSON.stringify(v)); },
+    has: async (k) => storage.has(k), delete: async (k) => { storage.delete(k); }, keys: async () => [...storage.keys()],
+  },
+  secrets: { get: async (k) => secrets.get(k) ?? null, has: async (k) => secrets.has(k), set: async () => {}, subscribe: () => () => {} },
+  net: {
+    fetch: async (url, init) => {
+      if (url.endsWith('/models')) {
+        const data = { data: [{ id: 'deepseek-chat' }, { id: 'deepseek-reasoner' }] };
+        return { ok: true, status: 200, statusText: 'OK', headers: {}, text: () => JSON.stringify(data), json: () => data };
+      }
+      const body = JSON.parse(init.body);
+      calls.push({ url, body });
+      await sleep(replyDelayMs);
+      const isBrief = body.messages[0].content.includes('音乐分析师');
+      const content = isBrief
+        ? JSON.stringify({ summary: '雨夜里反复确认的思念', mood: ['伤感', '克制'], tags: ['流行', '伤感', '叙事', '怀旧'], arc: '主歌低语，副歌反复追问', contrast: '', imagery: ['雨', '夜'], energy: { overall: 0.45, verse: 0.3, chorus: 0.6 }, visual: { motion: 0.4, density: 0.5, warmth: 0.6, space: 0.45, story: 0.75 }, known: true, confidence: 0.8 })
+        : JSON.stringify(decisionReply);
+      const data = { choices: [{ message: { content }, finish_reason: 'stop' }], usage: { prompt_tokens: isBrief ? 1500 : 2500, completion_tokens: isBrief ? 300 : 110, prompt_cache_hit_tokens: isBrief ? 0 : 1000 } };
+      return { ok: true, status: 200, statusText: 'OK', headers: {}, text: () => JSON.stringify(data), json: () => data };
+    },
+  },
+  get internals() { return { stores: { visualizerSettings: { getState: () => state } }, visualizerRegistry: { entries: registry } }; },
+};
+const registered = {};
+
+const results = [];
+const check = (name, ok, detail = '') => { results.push({ name, ok, detail }); say(ok ? 'PASS' : 'FAIL', name, detail); };
+const waitFor = async (fn, ms = 4000) => { const until = performance.now() + ms; while (performance.now() < until) { if (fn()) return true; await sleep(50); } return false; };
+
+const mod = await import('../lyric-ai-director-plus/client.mjs');
+const dispose = await mod.default(folium);
+registered.playerPanelTabs[0].mount(document.getElementById('panel'), {
+  locale: 'zh-CN', getTheme: () => ({}), every: (ms, fn) => { const id = setInterval(fn, ms); return () => clearInterval(id); },
+  onChange: () => () => {}, onFrame: () => () => {}, onResize: () => () => {}, onDispose: () => {},
+});
+
+// 0. fresh install: nothing configured -> setup guide, no request
+const songZ = { id: '9', source: 'netease', title: '首次', artist: 'x', album: null, ref: 'z' };
+play.song = songZ; currentLines = mkLines(2);
+emit('playback.songChanged', { song: songZ });
+emit('lyrics.loaded', { song: songZ, lines: currentLines });
+await sleep(400);
+check('全新安装：没选服务商时显示引导，不发请求', calls.length === 0 && document.getElementById('panel').textContent.includes('第一次使用'));
+settingsValues.provider = 'deepseek';
+settingsValues.model = 'deepseek-chat';
+const testCmd = registered.commands.find((c) => c.id === 'test');
+const testResult = await testCmd.run();
+say('[test]', testResult);
+check('测试连接：拿到模型列表并完成一次对话', /连接正常/.test(testResult), testResult);
+calls.length = 0;
+
+const startSong = (song, offset = 2) => {
+  play.song = song; play.position = 0;
+  currentLines = mkLines(offset);
+  emit('playback.songChanged', { song });
+  setTimeout(() => emit('lyrics.loaded', { song, lines: currentLines }), 100);
+};
+
+// 1. new song -> brief + decision -> applied before the first line
+startSong(songA);
+await waitFor(() => state.visualizerMode === 'partita');
+check('新歌：两步调用后切到 AI 选的模式', state.visualizerMode === 'partita', state.visualizerMode);
+check('新歌：恰好两次调用，并带关闭思考参数', calls.length === 2 && calls[0].body.thinking?.type === 'disabled', `${calls.length} 次`);
+check('参数：白名单内的写入，未知键丢弃', state.partitaTuning.staggerMax === 150 && state.partitaTuning.showGuideLines === false && !('bogus' in state.partitaTuning), JSON.stringify(state.partitaTuning));
+check('第 1 步歌词里过滤掉了编曲行', !calls[0].body.messages[1].content.includes('编曲'));
+check('第 2 步只带前 3 名的详细画像', (calls[1].body.messages[1].content.match(/^### /gm) ?? []).length === 3);
+await sleep(300);
+
+// 2. other song, then back -> remembered, no new calls
+decisionReply = { mode: 'diorama', params: {}, reason: '测试', confidence: 0.7 };
+startSong(songB);
+await waitFor(() => state.visualizerMode === 'diorama');
+const before = calls.length;
+startSong(songA);
+await waitFor(() => state.visualizerMode === 'partita');
+await sleep(300);
+check('听过的歌：记忆命中，0 次新调用', state.visualizerMode === 'partita' && calls.length === before, `${calls.length - before} 次`);
+
+// 3. user switches mode after the grace period -> recorded, not overridden
+await sleep(2100);
+state.handleSetVisualizerMode('lumiere');
+await sleep(100);
+const entryA = JSON.parse(storage.get('song:netease:1'));
+check('手动换模式：被识别为用户操作并记住', entryA.u?.mode === 'lumiere', JSON.stringify(entryA.u));
+
+// 4. late answer while a line is being sung -> waits for a gap
+replyDelayMs = 50;
+decisionReply = { mode: 'sonnet', params: { mgDensity: 1.5 }, reason: '测试晚到', confidence: 0.7 };
+const songC = { id: '3', source: 'netease', title: '晚到', artist: 'x', album: null, ref: 'c' };
+play.song = songC; currentLines = mkLines(2);
+emit('playback.songChanged', { song: songC });
+play.position = 7; // inside the first sung line (6-9 s; the 2 s line is a credit and is dropped)
+setTimeout(() => emit('lyrics.loaded', { song: songC, lines: currentLines }), 50);
+await sleep(800);
+const heldDuringLine = state.visualizerMode !== 'sonnet';
+play.position = 9.5; // gap 9-10 s is only 1 s: still unsafe
+await sleep(400);
+const heldInShortGap = state.visualizerMode !== 'sonnet';
+play.position = 200; // after the last line
+await waitFor(() => state.visualizerMode === 'sonnet');
+check('晚到的结果：唱的时候和短空隙里都不切', heldDuringLine && heldInShortGap);
+check('晚到的结果：到安全时刻才切', state.visualizerMode === 'sonnet');
+check('参数开关依赖：mgDensity 自动打开 showBackgroundMg', state.sonnetTuning.mgDensity === 1.5 && state.sonnetTuning.showBackgroundMg === true, JSON.stringify(state.sonnetTuning));
+
+// 4b. song already playing when set up: no lyrics event, nothing on screen -> online lyrics
+const songE = { id: '5', source: 'netease', title: '中途启用', artist: 'x', album: null, ref: 'e' };
+play.song = songE; play.position = 0; currentLines = [];
+const beforeE = calls.length;
+emit('playback.songChanged', { song: songE });
+await waitFor(() => calls.length >= beforeE + 1, 8000);
+const briefE = calls[beforeE]?.body.messages[1].content ?? '';
+check('没收到歌词事件：改从在线歌词拿到歌词', briefE.includes('主歌第') && !briefE.includes('没有歌词'), briefE.slice(0, 80));
+await waitFor(() => calls.length >= beforeE + 2, 4000);
+await sleep(300);
+
+// 4c. M4: the next song is prepared in the background, then applied at once
+const songF = { id: '6', source: 'netease', title: '下一首F', artist: 'x', album: null, ref: 'f' };
+const songG = { id: '7', source: 'netease', title: '下一首G', artist: 'x', album: null, ref: 'g' };
+decisionReply = { mode: 'claddagh', params: { radiusScale: 1.2 }, reason: '提前准备', confidence: 0.8 };
+queueSongs = [songE, songF, songG];
+const beforeF = calls.length;
+emit('playback.queueChanged', { length: 3, currentIndex: 0, version: 'v', byThisMod: false });
+await waitFor(() => calls.length >= beforeF + 2, 6000);
+await sleep(300);
+const storedF = storage.has('song:netease:6') ? JSON.parse(storage.get('song:netease:6')) : null;
+check('提前准备：下一首在后台做完两步并存进记忆，不动当前画面', storedF?.d?.mode === 'claddagh' && state.visualizerMode !== 'claddagh', JSON.stringify(storedF?.d ?? null));
+const beforeSwitch = calls.length;
+startSong(songF, 8);
+await sleep(400);
+check('切到准备好的歌：0 次新调用，第一句之前就切好', state.visualizerMode === 'claddagh' && calls.length === beforeSwitch, `${calls.length - beforeSwitch} 次`);
+check('面板标明这首是提前准备好的', document.getElementById('panel').textContent.includes('提前准备好'));
+
+// 4d. switching while the next song is still being prepared: no second pair of calls
+replyDelayMs = 1500;
+decisionReply = { mode: 'monet', params: {}, reason: '在途', confidence: 0.8 };
+const beforeG = calls.length;
+await waitFor(() => calls.length >= beforeG + 1, 4000); // G's brief is now in flight
+startSong(songG, 8);
+await waitFor(() => state.visualizerMode === 'monet', 8000);
+await sleep(2000);
+check('准备途中切过去：等它做完，不重复调用', state.visualizerMode === 'monet' && calls.length - beforeG === 2, `${calls.length - beforeG} 次`);
+replyDelayMs = 50;
+
+// 4e. repeat-one: nothing to prepare
+loopMode = 'one';
+const beforeLoop = calls.length;
+emit('playback.loopModeChanged', { mode: 'one' });
+await sleep(2200);
+check('单曲循环：不准备下一首', calls.length === beforeLoop);
+loopMode = 'off';
+queueSongs = [];
+
+// 4f. 智能动感 on: the chosen mode's beat effects are set with the switch; others are dropped
+decisionReply = { mode: 'tempera', params: { depthOfField: 1.6 }, effects: { 'tempera.inkFlash': { on: true, strength: 1.4 }, 'sonnet.lensTear': { on: true } }, reason: '鼓点', confidence: 0.8 };
+const songH = { id: '8', source: 'netease', title: '鼓点', artist: 'x', album: null, ref: 'h' };
+startSong(songH);
+await waitFor(() => state.visualizerMode === 'tempera');
+await sleep(200);
+check('智能动感：所选模式的鼓点效果和模式一起写入，别的模式的效果丢弃',
+  JSON.stringify(state.smartBeat.effects) === JSON.stringify({ 'tempera.inkFlash': { on: true, strength: 1.4 } }) && state.temperaTuning.depthOfField === 1.6,
+  JSON.stringify(state.smartBeat.effects));
+const storedH = JSON.parse(storage.get('song:netease:8'));
+check('智能动感：效果存进记忆，面板显示', storedH.d?.fx?.['tempera.inkFlash']?.strength === 1.4 && document.getElementById('panel').textContent.includes('墨染奥行 开 1.4'), JSON.stringify(storedH.d?.fx));
+// 智能动感 off: the AI is not asked and nothing is written
+state.smartBeat = { ...state.smartBeat, mode: 'off' };
+decisionReply = { mode: 'tempera', params: {}, effects: { 'tempera.inkFlash': { on: false } }, reason: '关', confidence: 0.8 };
+const songI = { id: '10', source: 'netease', title: '安静', artist: 'x', album: null, ref: 'i' };
+const beforeI = calls.length;
+state.handleSetVisualizerMode('tilt');
+await sleep(2100);
+startSong(songI);
+await waitFor(() => calls.length >= beforeI + 2 && state.visualizerMode === 'tempera', 6000);
+await sleep(200);
+check('智能动感关着：不问 AI 效果、不写入', state.smartBeat.effects['tempera.inkFlash'].on === true && !calls[beforeI + 1].body.messages[1].content.includes('鼓点效果'), JSON.stringify(state.smartBeat.effects));
+state.smartBeat = { ...state.smartBeat, mode: 'on' };
+
+// 4g. M5: a manual switch that sticks becomes taste; 👎 picks another mode; a similar song is told
+await sleep(2100); // past the start-of-song grace, where switches are the host's
+state.handleSetVisualizerMode('partita'); // songI shows tempera, picked by the AI
+await sleep(8600);
+const tasteNow = () => JSON.parse(storage.get('taste') ?? '{"items":[]}').items;
+const switched = tasteNow().find((item) => item.k === 'netease:10');
+check('口味：手动换模式停留 8 秒后记成一条反馈', switched?.kind === 'switch' && switched.from === 'tempera' && switched.to === 'partita', JSON.stringify(switched));
+check('面板显示口味记录', /你的口味（[1-9]\d* 条记录）/.test(document.getElementById('panel').textContent));
+decisionReply = { mode: 'monet', params: {}, reason: '换一个', confidence: 0.7 };
+const beforeDown = calls.length;
+const downResult = await registered.commands.find((c) => c.id === 'dislike').run();
+await waitFor(() => state.visualizerMode === 'monet', 4000);
+const downPrompt = calls[beforeDown]?.body.messages[1].content ?? '';
+check('👎：只花第 2 步，避开刚否掉的模式并换掉', calls.length - beforeDown === 1 && downPrompt.includes('这次要避开的模式：partita') && !downPrompt.includes('### partita') && state.visualizerMode === 'monet', downResult);
+check('👎：记成否定反馈', tasteNow().find((item) => item.k === 'netease:10')?.kind === 'down');
+const songJ = { id: '11', source: 'netease', title: '相似的歌', artist: 'x', album: null, ref: 'j' };
+decisionReply = { mode: 'fume', params: {}, reason: '相似', confidence: 0.7 };
+const beforeJ = calls.length;
+startSong(songJ);
+await waitFor(() => calls.length >= beforeJ + 2, 6000);
+await sleep(300);
+const promptJ = calls[beforeJ + 1]?.body.messages[1].content ?? '';
+check('相似的歌：提示词带上口味示例', promptJ.includes('用户口味') && promptJ.includes('用户否掉了 云阶'), promptJ.slice(promptJ.indexOf('用户口味'), promptJ.indexOf('用户口味') + 80));
+check('面板说明参考了口味记录', /参考了 \d+ 条/.test(document.getElementById('panel').textContent));
+
+// 5. missing key
+secrets.delete('apiKey');
+const songD = { id: '4', source: 'netease', title: '无密钥', artist: 'x', album: null, ref: 'd' };
+startSong(songD);
+await sleep(600);
+check('没填密钥：面板提示，不调用接口', document.getElementById('panel').textContent.includes('缺少密钥'));
+
+// 6. restore
+const restoreCmd = registered.commands.find((c) => c.id === 'restore');
+say('[restore]', await restoreCmd.run());
+check('恢复：回到第一次改动前的 tilt', state.visualizerMode === 'tilt', state.visualizerMode);
+check('恢复：鼓点效果回到 Folia 默认', JSON.stringify(state.smartBeat.effects['tempera.inkFlash']) === JSON.stringify({ on: true, strength: 1 }), JSON.stringify(state.smartBeat.effects));
+check('恢复：参数也回到原值', state.partitaTuning.staggerMax === 80 && state.sonnetTuning.showBackgroundMg === false, JSON.stringify(state.partitaTuning));
+
+const stats = JSON.parse(storage.get('stats'));
+check('花费累计：没填单价时只计 token、不算钱', stats.calls >= 4 && stats.input > 0 && stats.cost === 0, JSON.stringify(stats));
+window.__results = results;
+window.__panel = document.getElementById('panel').textContent;
+say('DONE', `${results.filter((r) => r.ok).length}/${results.length}`);
+</script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+# Release zips are attached to GitHub releases, not committed
+*.zip
+
+# Local working notes and probes, not part of the published mod
+m0-probe/
+DESIGN.md
+M1实测报告-*.md
+M2评测报告-*.md
+评测集标注审阅表.md
+.claude/
+
+# Model outputs from local evaluation runs
+dev/eval/
+发布到社区.md
