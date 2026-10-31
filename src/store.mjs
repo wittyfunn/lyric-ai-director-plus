@@ -79,7 +79,14 @@ export const createStore = (storage, log) => {
     }),
     /* The user picked another mode while this song played: remembered as the
      * song's choice from now on, and as feedback for M5. */
-    saveUserChoice: (songKey, mode) => putSong(songKey, { u: { mode, at: Date.now() } }),
+    saveUserChoice: (songKey, mode, { params, fx } = {}) => putSong(songKey, {
+      u: {
+        mode,
+        ...(params && Object.keys(params).length > 0 ? { params } : {}),
+        ...(fx && Object.keys(fx).length > 0 ? { fx } : {}),
+        at: Date.now(),
+      },
+    }),
     forgetDecision: async (songKey) => {
       const entry = await getSong(songKey);
       if (!entry) return;

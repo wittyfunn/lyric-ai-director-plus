@@ -10,7 +10,8 @@
 // becomes `const { a } = __x;` and `export const a` becomes a returned binding.
 // Only the forms this codebase uses are supported, and anything else fails loudly.
 //
-// Run: node dev/build.mjs   (from the project folder)
+// Run: node dev/build.mjs         release: dev-only modules become stubs
+//      node dev/build.mjs --dev   with the evaluation tools, for our own runs
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -21,11 +22,17 @@ const srcDir = path.join(root, 'src');
 const outFile = path.join(root, 'lyric-ai-director-plus', 'client.mjs');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'lyric-ai-director-plus', 'mod.json'), 'utf8'));
 
+const DEV = process.argv.includes('--dev');
+// What a dev-only module becomes in the release (its own imports go with it).
+const RELEASE_STUBS = { evaluate: 'export const createEvaluator = null;' };
+
 const IMPORT = /^import\s*\{([^}]+)\}\s*from\s*'\.\/([\w-]+)\.mjs';\s*$/;
 const varOf = (name) => `__${name.replace(/-/g, '_')}`;
 
 const parse = (name) => {
-  const source = fs.readFileSync(path.join(srcDir, `${name}.mjs`), 'utf8').replace(/\r\n/g, '\n');
+  const source = !DEV && RELEASE_STUBS[name] !== undefined
+    ? RELEASE_STUBS[name]
+    : fs.readFileSync(path.join(srcDir, `${name}.mjs`), 'utf8').replace(/\r\n/g, '\n');
   const deps = [];
   const exports = [];
   const lines = source.split('\n').map((line) => {
@@ -62,11 +69,12 @@ const visit = (name, trail = []) => {
 };
 visit('client');
 
-const unused = fs.readdirSync(srcDir).filter((file) => file.endsWith('.mjs') && !seen.has(file.slice(0, -4)));
+const devOnly = new Set(DEV ? [] : ['eval-set']); // reachable only through a stubbed module
+const unused = fs.readdirSync(srcDir).filter((file) => file.endsWith('.mjs') && !seen.has(file.slice(0, -4)) && !devOnly.has(file.slice(0, -4)));
 if (unused.length > 0) console.warn(`not reachable from client.mjs (left out): ${unused.join(', ')}`);
 
 const parts = [
-  `// AI 歌词动画导演 Plus ${manifest.version} — built from src/ by dev/build.mjs; edit src/, not this file.`,
+  `// AI 歌词动画导演 Plus ${manifest.version}${DEV ? ' (developer build)' : ''} — built from src/ by dev/build.mjs; edit src/, not this file.`,
   '// Source modules are kept in separate scopes below, in dependency order.',
   '',
 ];
@@ -85,4 +93,4 @@ for (const mod of order) {
   }
 }
 fs.writeFileSync(outFile, parts.join('\n'));
-console.log(`built ${path.relative(root, outFile)}: ${order.length} modules, ${fs.statSync(outFile).size} bytes`);
+console.log(`built ${path.relative(root, outFile)}${DEV ? ' (dev)' : ''}: ${order.length} modules, ${fs.statSync(outFile).size} bytes`);

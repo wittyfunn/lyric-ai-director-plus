@@ -5,6 +5,7 @@
 import { createHostAdapter } from './host-adapter.mjs';
 import { createStore } from './store.mjs';
 import { createDirector } from './director.mjs';
+import { createEvaluator } from './evaluate.mjs';
 import { mountPanel } from './panel.mjs';
 import { PROVIDERS } from './providers.mjs';
 
@@ -57,8 +58,9 @@ const SETTINGS = [
   { key: 'priceIn', type: 'number', group: T('花费显示', 'Cost'), label: T('输入单价（每百万 token）', 'Input price per 1M tokens'),
     description: T('照服务商价格页填，只用于面板估算花费；填 0 只显示 token 数', 'From the price page of your provider; 0 shows tokens only'), defaultValue: 0, min: 0, max: 200, step: 0.01 },
   { key: 'priceOut', type: 'number', group: T('花费显示', 'Cost'), label: T('输出单价（每百万 token）', 'Output price per 1M tokens'), defaultValue: 0, min: 0, max: 400, step: 0.01 },
-  { key: 'devTools', type: 'boolean', group: T('开发者', 'Developer'), label: T('显示评测工具', 'Show evaluation tools'),
-    description: T('在面板里加“评测”一栏：用内置的 30 首歌跑一遍，看选择和人工标注对得上多少。一次约 60 次调用', 'Run the built-in 30-song evaluation; about 60 calls'), defaultValue: false },
+  // Only in a developer build (node dev/build.mjs --dev); the release has no evaluator.
+  ...(createEvaluator ? [{ key: 'devTools', type: 'boolean', group: T('开发者', 'Developer'), label: T('显示评测工具', 'Show evaluation tools'),
+    description: T('在面板和命令面板里加“评测”：用内置的 42 首歌跑一遍，看选择和人工标注对得上多少。一次约 60 次调用', 'Run the built-in 42-song evaluation; about 60 calls'), defaultValue: false }] : []),
 ];
 
 export default async function activate(folium) {
@@ -92,7 +94,7 @@ export default async function activate(folium) {
       currency: values.currency === 'USD' ? '$' : '¥',
       priceIn: Number(values.priceIn ?? 0),
       priceOut: Number(values.priceOut ?? 0),
-      devTools: values.devTools === true,
+      devTools: values.devTools === true && Boolean(createEvaluator),
     };
   };
 
@@ -106,6 +108,7 @@ export default async function activate(folium) {
     settings,
     onChange: () => renderers.forEach((render) => render()),
   });
+  const evaluator = createEvaluator?.({ folium, store, settings, ...director.forEvaluation() }) ?? null;
 
   folium.events.on('playback.songChanged', ({ song }) => director.onSongChanged(song));
   folium.events.on('lyrics.loaded', ({ song, lines }) => director.onLyricsLoaded(song, lines));
@@ -119,6 +122,7 @@ export default async function activate(folium) {
   section.settings.onChange(() => {
     director.onSetupChanged();
     director.onQueueChanged();
+    syncEvalCommand();
   });
 
   folium.registries.playerPanelTabs.register({
@@ -127,6 +131,7 @@ export default async function activate(folium) {
     order: 600,
     mount: (container, ctx) => mountPanel(container, ctx, {
       director,
+      evaluator,
       folium,
       settings,
       onRender: (render) => {
@@ -153,7 +158,17 @@ export default async function activate(folium) {
     if (!report.chat) return report.modelsError ? `获取模型失败：${report.modelsError}` : `连接正常，可用模型 ${report.models?.length ?? 0} 个，请在设置里填模型名`;
     return `连接正常：${report.chat.ms} ms${report.chat.thought ? '，但模型在“思考”，建议换一种关闭思考的方式' : ''}`;
   }, ['测试', '连接']);
-  command('evaluate', 'AI 导演 Plus：运行评测集', 'AI director Plus: run the evaluation set', () => director.evaluate(), ['评测', 'eval']);
+  // About 60 calls a run: listed only while the developer switch is on.
+  let evalCommand = null;
+  const syncEvalCommand = () => {
+    if (settings().devTools && !evalCommand) {
+      evalCommand = command('evaluate', 'AI 导演 Plus：运行评测集', 'AI director Plus: run the evaluation set', () => evaluator.evaluate(), ['评测', 'eval']);
+    } else if (!settings().devTools && evalCommand) {
+      evalCommand.unregister();
+      evalCommand = null;
+    }
+  };
+  syncEvalCommand();
   command('restore', 'AI 导演 Plus：恢复原来的设置', 'AI director Plus: restore my settings', () => director.restore(), ['恢复', '还原']);
   command('open', 'AI 导演 Plus：打开面板', 'AI director Plus: open panel', () => {
     folium.ui.openPlayerPanel(PANEL_ID);

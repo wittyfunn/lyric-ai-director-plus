@@ -72,7 +72,7 @@ const profileBlock = (candidate, effects = []) => {
   const knobs = Object.entries(profile.knobs ?? {});
   const spec = knobs.length > 0 ? paramSpecLine(candidate.id, knobs.map(([key]) => key)) : '';
   const rows = [
-    `### ${candidate.id}（${profile.name}，贴合度 ${candidate.score.toFixed(2)}）`,
+    `### ${candidate.id}（${profile.name}${typeof candidate.score === 'number' ? `，贴合度 ${candidate.score.toFixed(2)}` : ''}）`,
     `画面：${profile.host}`,
     `适合：${profile.fit.join('、') || '—'}；不适合：${profile.avoid.join('、') || '—'}`,
   ];
@@ -106,5 +106,30 @@ export const buildDecideUser = ({ brief, title, artist, candidates, others, prev
   if (recentModes.length > 0) lines.push(`最近用过的模式（新→旧，只在平局时参考）：${recentModes.join('、')}`);
   lines.push('', '候选模式：', ...candidates.map((candidate) => profileBlock(candidate, effects[candidate.id] ?? [])));
   if (others.length > 0) lines.push('', `其他模式：${others.map((mode) => `${mode.id}（${mode.label}）`).join('、')}`);
+  return lines.join('\n');
+};
+
+// ---------------------------------------------------------------- after a manual switch: parameters only
+
+export const TUNE_SYSTEM = [
+  '你是歌词动画导演。用户已经亲自为这首歌选定了歌词动画模式，模式不能改；你只需要根据“歌曲简报”给出这个模式的参数，让画面更贴合这首歌。',
+  '',
+  '规则：',
+  '1. params 的键名和范围必须来自给出的清单。只给 2~5 个你确信能让画面更贴合这首歌的参数。',
+  '2. 形如 key(…)[需 X=Y] 的参数只在开关 X=Y 时生效，要改它就把开关一起写进 params；形如 key(…)[需效果 X 开] 的参数只在效果 X 打开时生效。',
+  '3. 如果附有“鼓点效果”，为每个效果决定开关和强度(0~2，1 为默认)：节奏鲜明、鼓点清楚的歌打开，能量越高强度越大；安静、抒情、几乎没有鼓的歌关掉。没有附效果就不要输出 effects。',
+  '',
+  '只输出一个 JSON 对象，不要任何其他文字：',
+  '{ "params": { "键": 值 }, "effects": { "效果 id": { "on": true, "strength": 1 } }, "reason": "不超过 30 字，这些参数为什么贴合这首歌" }',
+].join('\n');
+
+/** The one mode the user chose, with its parameters and beat effects to fill in. */
+export const buildTuneUser = ({ brief, title, artist, mode, effects = [], userHint }) => {
+  const lines = [
+    `歌曲：${title} - ${artist}`,
+    `简报：${JSON.stringify(brief)}`,
+  ];
+  if (userHint) lines.push(`用户偏好：${userHint}`);
+  lines.push('', '用户选定的模式：', profileBlock({ id: mode }, effects));
   return lines.join('\n');
 };

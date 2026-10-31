@@ -5,7 +5,7 @@ import { MODE_PARAMS, sanitizeParams, paramSpecLine, tuningKeyOf, sanitizeEffect
 import { PROFILES, TAGS } from '../src/profiles.mjs';
 import { buildSongContext, cleanLines, markChorus, songKeyOf } from '../src/song-context.mjs';
 import { rankModes } from '../src/ranker.mjs';
-import { BRIEF_SYSTEM, buildBriefUser, DECIDE_SYSTEM, buildDecideUser } from '../src/prompts.mjs';
+import { BRIEF_SYSTEM, buildBriefUser, DECIDE_SYSTEM, buildDecideUser, TUNE_SYSTEM, buildTuneUser } from '../src/prompts.mjs';
 import { isSafeMoment } from '../src/director.mjs';
 import { addFeedback, briefPrint, similarity, tasteBias, similarExamples, tasteSummary, describeItem, emptyTaste, TASTE_MAX } from '../src/taste.mjs';
 import { chatJson, listModels, usageOf } from '../src/llm.mjs';
@@ -191,6 +191,16 @@ test('taste reaches the ranking and the prompt', () => {
   assert.match(user, /用户口味（从用户过去的修改学到的）：\n- 整体：常主动选 云阶\n- 《甲》：AI 选了 倾诉，用户改成 云阶/);
   assert.match(user, /这次要避开的模式：tilt（倾诉）/);
   assert.ok(DECIDE_SYSTEM.includes('用户口味'));
+});
+
+test('tuning prompt: only the chosen mode, its knobs and its beat effects', () => {
+  const brief = { summary: '说唱', tags: ['说唱'], visual: { motion: 0.7 }, energy: { overall: 0.7 } };
+  const user = buildTuneUser({ brief, title: 't', artist: 'a', mode: 'tempera', effects: ['tempera.inkFlash'], userHint: '' });
+  assert.match(user, /用户选定的模式：\n### tempera（凝彩）/);
+  assert.match(user, /depthOfField\(0~2\)\[需效果 tempera\.inkFlash 开\]/);
+  assert.match(user, /- tempera\.inkFlash（墨染奥行/);
+  assert.doesNotMatch(user, /### sonnet/);
+  assert.ok(TUNE_SYSTEM.includes('模式不能改') && TUNE_SYSTEM.includes('"params"') && !TUNE_SYSTEM.includes('"mode"'));
 });
 
 test('safe moments: before the first line and in real gaps only', () => {

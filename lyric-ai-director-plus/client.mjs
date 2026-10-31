@@ -1,4 +1,4 @@
-// AI 歌词动画导演 Plus 1.0.0 — built from src/ by dev/build.mjs; edit src/, not this file.
+// AI 歌词动画导演 Plus 1.0.3 — built from src/ by dev/build.mjs; edit src/, not this file.
 // Source modules are kept in separate scopes below, in dependency order.
 
 // ---- src/params.mjs
@@ -718,7 +718,14 @@ const createStore = (storage, log) => {
     }),
     /* The user picked another mode while this song played: remembered as the
      * song's choice from now on, and as feedback for M5. */
-    saveUserChoice: (songKey, mode) => putSong(songKey, { u: { mode, at: Date.now() } }),
+    saveUserChoice: (songKey, mode, { params, fx } = {}) => putSong(songKey, {
+      u: {
+        mode,
+        ...(params && Object.keys(params).length > 0 ? { params } : {}),
+        ...(fx && Object.keys(fx).length > 0 ? { fx } : {}),
+        at: Date.now(),
+      },
+    }),
     forgetDecision: async (songKey) => {
       const entry = await getSong(songKey);
       if (!entry) return;
@@ -1159,7 +1166,7 @@ const profileBlock = (candidate, effects = []) => {
   const knobs = Object.entries(profile.knobs ?? {});
   const spec = knobs.length > 0 ? paramSpecLine(candidate.id, knobs.map(([key]) => key)) : '';
   const rows = [
-    `### ${candidate.id}（${profile.name}，贴合度 ${candidate.score.toFixed(2)}）`,
+    `### ${candidate.id}（${profile.name}${typeof candidate.score === 'number' ? `，贴合度 ${candidate.score.toFixed(2)}` : ''}）`,
     `画面：${profile.host}`,
     `适合：${profile.fit.join('、') || '—'}；不适合：${profile.avoid.join('、') || '—'}`,
   ];
@@ -1195,7 +1202,32 @@ const buildDecideUser = ({ brief, title, artist, candidates, others, previous, r
   if (others.length > 0) lines.push('', `其他模式：${others.map((mode) => `${mode.id}（${mode.label}）`).join('、')}`);
   return lines.join('\n');
 };
-return { BRIEF_SYSTEM, buildBriefUser, DECIDE_SYSTEM, buildDecideUser };
+
+// ---------------------------------------------------------------- after a manual switch: parameters only
+
+const TUNE_SYSTEM = [
+  '你是歌词动画导演。用户已经亲自为这首歌选定了歌词动画模式，模式不能改；你只需要根据“歌曲简报”给出这个模式的参数，让画面更贴合这首歌。',
+  '',
+  '规则：',
+  '1. params 的键名和范围必须来自给出的清单。只给 2~5 个你确信能让画面更贴合这首歌的参数。',
+  '2. 形如 key(…)[需 X=Y] 的参数只在开关 X=Y 时生效，要改它就把开关一起写进 params；形如 key(…)[需效果 X 开] 的参数只在效果 X 打开时生效。',
+  '3. 如果附有“鼓点效果”，为每个效果决定开关和强度(0~2，1 为默认)：节奏鲜明、鼓点清楚的歌打开，能量越高强度越大；安静、抒情、几乎没有鼓的歌关掉。没有附效果就不要输出 effects。',
+  '',
+  '只输出一个 JSON 对象，不要任何其他文字：',
+  '{ "params": { "键": 值 }, "effects": { "效果 id": { "on": true, "strength": 1 } }, "reason": "不超过 30 字，这些参数为什么贴合这首歌" }',
+].join('\n');
+
+/** The one mode the user chose, with its parameters and beat effects to fill in. */
+const buildTuneUser = ({ brief, title, artist, mode, effects = [], userHint }) => {
+  const lines = [
+    `歌曲：${title} - ${artist}`,
+    `简报：${JSON.stringify(brief)}`,
+  ];
+  if (userHint) lines.push(`用户偏好：${userHint}`);
+  lines.push('', '用户选定的模式：', profileBlock({ id: mode }, effects));
+  return lines.join('\n');
+};
+return { BRIEF_SYSTEM, buildBriefUser, DECIDE_SYSTEM, buildDecideUser, TUNE_SYSTEM, buildTuneUser };
 })();
 
 // ---- src/ranker.mjs
@@ -1283,70 +1315,6 @@ const rankModes = (brief, modeIds, bias = {}) => {
   return { ranked, unprofiled, decisive };
 };
 return { rankModes };
-})();
-
-// ---- src/eval-set.mjs
-const __eval_set = (() => {
-// The M2 evaluation set: songs chosen to cover genres, moods, languages and
-// every builtin mode, each with the modes a person would accept for it (1-3).
-// Only titles and artists are stored; lyrics are fetched live through Folia's
-// online sources when the evaluation runs, so no lyric text ships with the mod.
-//
-// `accept` is a first draft written from each mode's look (profiles.mjs) and
-// the song's character; it is meant to be reviewed by people and revised.
-// Bump EVAL_SET_VERSION whenever labels change, so results stay comparable.
-//
-// `holdout: true` songs were added (and labelled) after profile v2 was tuned on
-// the first 30, so they give an honest score for that tuning; never tune on them.
-
-const EVAL_SET_VERSION = 3;
-
-const EVAL_SET = [
-  { title: '晴天', artist: '周杰伦', accept: ['partita', 'pendolo', 'classic'], note: '校园回忆，叙事' },
-  { title: '十年', artist: '陈奕迅', accept: ['pendolo', 'partita', 'tilt'], note: '时间与告别' },
-  { title: '倔强', artist: '五月天', accept: ['sonnet', 'lumiere'], note: '摇滚励志，副歌爆发' },
-  { title: '海阔天空', artist: 'Beyond', accept: ['lumiere', 'sonnet'], note: '壮阔摇滚' },
-  { title: '江南', artist: '林俊杰', accept: ['lumiere', 'partita', 'claddagh'], note: '中国风抒情' },
-  { title: '消愁', artist: '毛不易', accept: ['partita', 'monet', 'fume'], note: '民谣，文学性' },
-  { title: '成都', artist: '赵雷', accept: ['partita', 'monet', 'pendolo'], note: '民谣，城市怀旧' },
-  { title: '光年之外', artist: '邓紫棋', accept: ['diorama', 'lumiere', 'sonnet'], note: '宇宙意象，壮阔' },
-  { title: '演员', artist: '薛之谦', accept: ['tilt', 'fume', 'classic'], note: '伤感独白' },
-  { title: 'Made in China', artist: 'Higher Brothers', accept: ['fume', 'tempera', 'sonnet'], note: '说唱，躁动' },
-  { title: '目不转睛', artist: '王以太', accept: ['tilt', 'fume', 'claddagh'], note: '说唱 R&B，暧昧' },
-  { title: '爱人错过', artist: '告五人', accept: ['tempera', 'sonnet', 'classic'], note: '独立流行，轻快' },
-  { title: '今天你要嫁给我', artist: '陶喆 蔡依林', accept: ['tempera'], note: '对唱，俏皮；审阅：不要群唱' },
-  { title: '屋顶', artist: '周杰伦 温岚', accept: ['cappella', 'claddagh'], note: '男女对唱，浪漫' },
-  { title: '红豆', artist: '王菲', accept: ['classic', 'claddagh', 'monet'], note: '温柔情歌' },
-  { title: '贝加尔湖畔', artist: '李健', accept: ['lumiere', 'claddagh', 'partita'], note: '自然意象，浪漫' },
-  { title: 'Plastic Love', artist: '竹内まりや', accept: ['tempera', 'fume', 'monet'], note: 'City Pop，都市夜色' },
-  { title: '夜に駆ける', artist: 'YOASOBI', accept: ['sonnet', 'tempera'], note: '快节奏 J-Pop，叙事' },
-  { title: 'Lemon', artist: '米津玄師', accept: ['lumiere', 'tilt', 'fume'], note: '悼念，伤感' },
-  { title: '打上花火', artist: 'DAOKO 米津玄師', accept: ['hanabi', 'claddagh'], note: '夏日烟火' },
-  { title: 'secret base ~君がくれたもの~', artist: 'ZONE', accept: ['hanabi', 'partita', 'pendolo'], note: '夏天，青春回忆' },
-  { title: 'Faded', artist: 'Alan Walker', accept: ['diorama', 'cadenza'], note: '电子，迷离' },
-  { title: "when the party's over", artist: 'Billie Eilish', accept: ['cadenza', 'tilt', 'lumiere'], note: '极简暗黑，耳语' },
-  { title: "Don't Know Why", artist: 'Norah Jones', accept: ['monet', 'classic'], note: '爵士，慵懒' },
-  { title: 'Bohemian Rhapsody', artist: 'Queen', accept: ['sonnet', 'lumiere'], note: '摇滚歌剧，多段落' },
-  { title: 'Summer', artist: '久石让', accept: ['lumiere', 'monet', 'classic'], note: '纯音乐钢琴', instrumental: true },
-  { title: 'Love Story', artist: 'Taylor Swift', accept: ['partita', 'sonnet', 'claddagh'], note: '童话式叙事' },
-  { title: '月亮代表我的心', artist: '邓丽君', accept: ['monet', 'classic', 'claddagh'], note: '经典老歌' },
-  { title: 'DDU-DU DDU-DU', artist: 'BLACKPINK', accept: ['tempera', 'sonnet', 'diorama'], note: 'K-Pop，强节奏' },
-  { title: '牵丝戏', artist: '银临', accept: ['lumiere', 'partita'], note: '古风，叙事' },
-  // ---- holdout (labelled 2026-10-28 before any run on them)
-  { title: '富士山下', artist: '陈奕迅', accept: ['partita', 'lumiere', 'tilt'], note: '放手，粤语抒情', holdout: true },
-  { title: '稻香', artist: '周杰伦', accept: ['partita', 'classic', 'tempera'], note: '温暖治愈，乡村回忆', holdout: true },
-  { title: '大风吹', artist: '草东没有派对', accept: ['sonnet', 'tilt', 'fume'], note: '愤怒独立摇滚', holdout: true },
-  { title: '杀死那个石家庄人', artist: '万能青年旅店', accept: ['fume', 'lumiere', 'sonnet'], note: '文学摇滚，壮阔', holdout: true },
-  { title: '遇见', artist: '孙燕姿', accept: ['classic', 'claddagh', 'partita'], note: '温柔希望', holdout: true },
-  { title: '特别的人', artist: '方大同', accept: ['tilt', 'claddagh', 'classic'], note: 'R&B 情歌', holdout: true },
-  { title: 'Viva La Vida', artist: 'Coldplay', accept: ['lumiere', 'sonnet'], note: '管弦史诗', holdout: true },
-  { title: 'Summertime Sadness', artist: 'Lana Del Rey', accept: ['tilt', 'cadenza', 'lumiere'], note: '慵懒忧郁', holdout: true },
-  { title: 'First Love', artist: '宇多田ヒカル', accept: ['classic', 'pendolo', 'claddagh'], note: '经典日语情歌', holdout: true },
-  { title: 'Wake Me Up', artist: 'Avicii', accept: ['tempera', 'sonnet', 'diorama'], note: 'EDM 民谣', holdout: true },
-  { title: '奇洛李维斯回信', artist: '薛凯琪', accept: ['tempera', 'classic'], note: '俏皮回信；审阅：不要群唱', holdout: true },
-  { title: '罗刹海市', artist: '刀郎', accept: ['fume', 'tilt', 'partita'], note: '讽喻民谣，歌词密', holdout: true },
-];
-return { EVAL_SET_VERSION, EVAL_SET };
 })();
 
 // ---- src/providers.mjs
@@ -1750,11 +1718,10 @@ const __director = (() => {
 // touches the player.
 
 const { buildSongContext, cleanLines, songKeyOf } = __song_context;
-const { BRIEF_SYSTEM, buildBriefUser, DECIDE_SYSTEM, buildDecideUser } = __prompts;
+const { BRIEF_SYSTEM, buildBriefUser, DECIDE_SYSTEM, buildDecideUser, TUNE_SYSTEM, buildTuneUser } = __prompts;
 const { rankModes } = __ranker;
 const { sanitizeParams, sanitizeEffects } = __params;
-const { PROFILES, PROFILE_VERSION } = __profiles;
-const { EVAL_SET, EVAL_SET_VERSION } = __eval_set;
+const { PROFILES } = __profiles;
 const { chatJson, testConnection } = __llm;
 const { addFeedback, briefPrint, describeItem, emptyTaste, normalizeTaste, similarExamples, tasteBias, tasteSummary } = __taste;
 const { baseUrlFor, isLocalUrl, thinkingMethodFor, THINKING_OFF } = __providers;
@@ -1764,7 +1731,6 @@ const USER_CHANGE_GRACE_MS = 2000; // host-side switches right after a song chan
 const SAFE_POLL_MS = 200;
 const RECENT_MAX = 6;
 const CACHED_PRICE_RATIO = 0.1;
-const EVAL_BRIEF_CACHE = 1; // bump when the brief prompt changes
 const SETTLE_MS = 8000; // a manual mode counts as taste once the user stays on it this long
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -1930,6 +1896,45 @@ const createDirector = ({ folium, host, store, settings, onChange }) => {
     if (from === target.userMode) return; // looked around and came back
     target.tasteRecorded = target.userMode;
     await remember(target, 'switch', { from, to: target.userMode });
+    if (target === current && host.currentMode() === target.userMode) await tuneManual(target, target.userMode);
+  };
+
+  /* The user picked `mode` by hand: the AI fills in its parameters (and beat
+   * effects) for this song from the brief, one step-2-sized call; they go out
+   * at a safe moment and are remembered with the user's choice. */
+  const tuneManual = async (target, mode) => {
+    const values = settings();
+    if (!values.applyParams || !target?.brief || !PROFILES[mode]) return null;
+    const effects = beatFxOn() ? host.listBeatEffects(mode) : [];
+    if (Object.keys(PROFILES[mode].knobs ?? {}).length === 0 && effects.length === 0) return null;
+    const gen = generation;
+    setPhase(target, 'tuning', `正在按这首歌给 ${nameOf(mode)} 调参数`);
+    try {
+      const { json } = await callModel(target, TUNE_SYSTEM, buildTuneUser({
+        brief: target.brief,
+        title: target.song.title,
+        artist: target.song.artist,
+        mode,
+        effects,
+        userHint: values.userHint,
+      }));
+      if (target.userMode !== mode) return null; // switched again meanwhile
+      const tuned = {
+        mode,
+        params: sanitizeParams(mode, json?.params),
+        fx: beatFxOn() ? sanitizeEffects(json?.effects, effects) : {},
+        reason: typeof json?.reason === 'string' ? json.reason : '',
+      };
+      target.tuned = tuned;
+      if (values.remember) await store.saveUserChoice(target.key, mode, tuned).catch(() => {});
+      if (gen === generation) await applyWhenSafe(gen, target, tuned, 'user', { manual: true });
+      setPhase(target, 'user', `你换成了 ${nameOf(mode)}，AI 已按这首歌调好参数`);
+      return tuned;
+    } catch (error) {
+      log.warn('手动换模式后调参数失败', { message: String(error?.message ?? error) });
+      setPhase(target, 'user', `你换成了 ${nameOf(mode)}（没能调参数：${String(error?.message ?? error)}）`);
+      return null;
+    }
   };
 
   /* Choices made by hand before M5 (song memory with both a pick and a user mode). */
@@ -1941,6 +1946,13 @@ const createDirector = ({ folium, host, store, settings, onChange }) => {
       taste = addFeedback(taste, { k: key, t: '', ...briefPrint(entry.b), kind: 'switch', from, to: entry.u.mode, at: entry.u.at });
     }
     await store.set('taste', taste).catch(() => {});
+  };
+
+  /* The local ranking of a remembered song, for the panel: no AI call. */
+  const rankForPanel = (brief) => {
+    if (!brief) return null;
+    const bias = settings().learnTaste && taste.items.length > 0 ? tasteBias(taste, briefPrint(brief)) : {};
+    return rankModes(brief, host.listModes().map((mode) => mode.id), bias).ranked;
   };
 
   // ------------------------------------------------------------ applying
@@ -1977,11 +1989,12 @@ const createDirector = ({ folium, host, store, settings, onChange }) => {
   /* Waits for a moment that will not cut a sung line, then applies. Nothing to
    * wait for when the player already shows this choice, or while it is paused
    * (a switch on a still frame interrupts nothing). */
-  const applyWhenSafe = async (gen, target, decision, phaseDone) => {
+  const applyWhenSafe = async (gen, target, decision, phaseDone, { manual = false } = {}) => {
     const lines = cleanLines(target.lines ?? (lastLyrics.key === target.key ? lastLyrics.lines : folium.lyrics.getLines()));
     let waited = false;
     for (;;) {
-      if (gen !== generation || disposed || target.userOverrode) return false;
+      if (gen !== generation || disposed || (target.userOverrode && !manual)) return false;
+      if (manual && host.currentMode() !== decision.mode) return false; // the user moved on
       const { position, song, state } = folium.playback.getState();
       if (!song) return false;
       if (host.shows(decision.mode, settings().applyParams ? decision.params : null, beatFxOn() ? decision.fx : null)) break;
@@ -2157,7 +2170,7 @@ const createDirector = ({ folium, host, store, settings, onChange }) => {
     next = job;
     const entry = (await store.getSong(key)) ?? {};
     if (entry.d || entry.u) {
-      job.decision = entry.u ? { mode: entry.u.mode, params: {}, reason: '你之前手动选的模式' } : entry.d;
+      job.decision = entry.u ? { mode: entry.u.mode, params: entry.u.params ?? {}, fx: entry.u.fx ?? {}, reason: '你之前手动选的模式' } : entry.d;
       setPhase(job, 'remembered', '已经记住了，切过去会直接套用');
       return;
     }
@@ -2235,8 +2248,9 @@ const createDirector = ({ folium, host, store, settings, onChange }) => {
     const entry = await store.getSong(key);
     if (gen !== generation) return;
     current.brief = entry?.b ?? null;
+    current.ranked = rankForPanel(current.brief);
     if (entry?.u && settings().remember) {
-      current.decision = { mode: entry.u.mode, params: {}, reason: '你之前为这首歌手动选的模式', confidence: 1 };
+      current.decision = { mode: entry.u.mode, params: entry.u.params ?? {}, fx: entry.u.fx ?? {}, reason: '你之前为这首歌手动选的模式', confidence: 1 };
       current.decidedBy = 'user-memory';
       await applyWhenSafe(gen, current, current.decision, 'user-memory');
       prepareNext();
@@ -2268,156 +2282,9 @@ const createDirector = ({ folium, host, store, settings, onChange }) => {
     settleTimer = setTimeout(() => { settleSwitch(target).catch(() => {}); }, SETTLE_MS);
   };
 
-  // ------------------------------------------------------------ evaluation (developer tool)
-
-  /*
-   * Runs the real pipeline over EVAL_SET and scores it against the people's
-   * labels. Nothing touches the player or the per-song memory, and "recently
-   * used" is left out so the order of the set cannot sway the picks. Briefs are
-   * cached under `evalBriefs`, so a rerun after changing profiles or the ranking
-   * pays for step 2 only; `rebrief` pays for both again.
-   */
-  let evalRun = null;
-
-  const normalize = (text) => String(text ?? '').toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
-  /* Search hits that plausibly are this song, best first: exact title, then the
-   * listed artist first in the credits (the M2 baseline matched a remix of
-   * "Made in China" by another artist and got no lyrics). */
-  const findEvalSongs = async (item) => {
-    const page = await folium.omni.searchSongs(`${item.title} ${item.artist}`, { limit: 8 });
-    const title = normalize(item.title);
-    const artists = item.artist.split(/\s+/).map(normalize).filter(Boolean);
-    const score = (song) => {
-      const found = normalize(song.title);
-      const credits = normalize(song.artist);
-      const titleScore = found === title ? 2 : (found.includes(title) || title.includes(found) ? 1 : 0);
-      const artistScore = artists.some((artist) => credits.includes(artist)) ? 1 : 0;
-      return titleScore + artistScore + (credits.startsWith(artists[0] ?? '\u0000') ? 0.5 : 0);
-    };
-    return [...page.items].filter((song) => score(song) >= 2).sort((a, b) => score(b) - score(a)).slice(0, 3);
-  };
-
-  const summarize = (run) => {
-    const scored = run.rows.filter((row) => !row.error);
-    const rateOf = (rows, key) => (rows.length ? Math.round((rows.filter((row) => row[key]).length / rows.length) * 100) : 0);
-    const used = {};
-    for (const row of scored) used[row.decision.mode] = (used[row.decision.mode] ?? 0) + 1;
-    const holdout = scored.filter((row) => row.holdout);
-    const tuned = scored.filter((row) => !row.holdout);
-    return {
-      songs: run.rows.length,
-      scored: scored.length,
-      failed: run.rows.length - scored.length,
-      aiHit: rateOf(scored, 'hit'),
-      localTop1: rateOf(scored, 'top1'),
-      localTop3: rateOf(scored, 'top3'),
-      tuned: { songs: tuned.length, aiHit: rateOf(tuned, 'hit'), localTop1: rateOf(tuned, 'top1'), localTop3: rateOf(tuned, 'top3') },
-      holdout: { songs: holdout.length, aiHit: rateOf(holdout, 'hit'), localTop1: rateOf(holdout, 'top1'), localTop3: rateOf(holdout, 'top3') },
-      distinctModes: Object.keys(used).length,
-      modeUse: used,
-      usage: run.usage,
-    };
-  };
-
-  const evaluate = async ({ rebrief = false } = {}) => {
-    if (evalRun?.running) return '评测正在进行中';
-    if (typeof folium.omni?.searchSongs !== 'function') return '这个版本的 Folia 没有在线音源接口，无法评测';
-    await endpoint(); // fail early on missing setup
-    const stored = (await store.get('evalBriefs')) ?? {};
-    // Briefs depend on the brief prompt, not on the labels: relabelling keeps them.
-    const cache = stored.version === EVAL_BRIEF_CACHE ? stored.briefs ?? {} : {};
-    // A brief written without lyrics may only mean the lyrics were not found: try again.
-    for (const row of (await store.get('evalLast'))?.rows ?? []) {
-      if (row.instrumental) delete cache[`${row.title}|${row.artist}`];
-    }
-    const values = settings();
-    const run = {
-      running: true,
-      done: 0,
-      total: EVAL_SET.length,
-      rows: [],
-      startedAt: Date.now(),
-      model: values.model,
-      endpoint: baseUrlFor(values).replace(/^https?:\/\//, '').split('/')[0],
-      usage: { calls: 0, input: 0, output: 0, cached: 0, cost: 0 },
-    };
-    evalRun = run;
-    emit();
-    for (const item of EVAL_SET) {
-      if (disposed) break;
-      const id = `${item.title}|${item.artist}`;
-      const row = { title: item.title, artist: item.artist, accept: item.accept, note: item.note, holdout: Boolean(item.holdout) };
-      try {
-        const candidates = await findEvalSongs(item);
-        if (candidates.length === 0) throw new Error('在线音源里找不到这首歌');
-        const brief = rebrief ? null : cache[id] ?? null;
-        // The first candidate that has lyrics (or says it is instrumental); else the best one.
-        let song = candidates[0];
-        let lines = [];
-        if (!brief) {
-          for (const candidate of candidates) {
-            const lyrics = await folium.omni.getLyrics(candidate).catch(() => ({ lines: [], isPureMusic: false }));
-            if (lyrics.lines.length > 0 || lyrics.isPureMusic) {
-              song = candidate;
-              lines = lyrics.lines;
-              break;
-            }
-          }
-        }
-        row.found = `${song.title} - ${song.artist}`;
-        const job = { phase: 'idle', message: '', usage: run.usage };
-        const decision = await think(job, {
-          song,
-          key: `eval:${id}`,
-          lines,
-          durationSeconds: lines[lines.length - 1]?.endTime ?? 0,
-          theme: null,
-          entry: { b: brief },
-          persist: false,
-          recent: [],
-        });
-        row.brief = job.brief;
-        row.instrumental = Boolean(job.instrumental);
-        if (!job.instrumental) cache[id] = job.brief; // cached briefs all came from lyrics
-        row.top = job.ranked.slice(0, 5).map((item) => ({ id: item.id, score: item.score }));
-        row.decision = { mode: decision.mode, reason: decision.reason, confidence: decision.confidence, params: decision.params, fx: decision.fx };
-        row.hit = item.accept.includes(decision.mode);
-        row.top1 = item.accept.includes(job.ranked[0]?.id);
-        row.top3 = job.ranked.slice(0, 3).some((candidate) => item.accept.includes(candidate.id));
-        // No lyrics for a song with lyrics means the search matched a cover or a
-        // backing track: a data problem, not a wrong pick, so it is not scored.
-        if (row.instrumental && !item.instrumental) row.error = `没拿到歌词，可能匹配到了翻唱或伴奏（${row.found}）`;
-      } catch (error) {
-        row.error = String(error?.message ?? error);
-      }
-      run.rows.push(row);
-      run.done += 1;
-      emit();
-    }
-    await store.set('evalBriefs', { version: EVAL_BRIEF_CACHE, briefs: cache });
-    run.running = false;
-    run.summary = summarize(run);
-    await store.set('evalLast', evalReport(run));
-    emit();
-    const s = run.summary;
-    return `评测完成：AI 命中 ${s.aiHit}%，本地第一名 ${s.localTop1}%，本地前三 ${s.localTop3}%（${s.scored}/${s.songs} 首有效）`;
-  };
-
-  /** The exportable form: everything needed to rescore the ranking offline. */
-  const evalReport = (run) => ({
-    setVersion: EVAL_SET_VERSION,
-    profileVersion: PROFILE_VERSION,
-    at: new Date(run.startedAt).toISOString(),
-    model: run.model,
-    endpoint: run.endpoint,
-    summary: run.summary ?? summarize(run),
-    rows: run.rows,
-  });
-
   return {
-    evaluate,
-    getEvalRun: () => evalRun,
-    getEvalReport: async () => (evalRun && !evalRun.running ? evalReport(evalRun) : (await store.get('evalLast')) ?? null),
+    /** What the developer-only evaluator (src/evaluate.mjs) runs on. */
+    forEvaluation: () => ({ think, endpoint, emit, isDisposed: () => disposed }),
     start: async () => {
       totals = { ...totals, ...((await store.get('stats')) ?? {}) };
       recentModes = (await store.get('recent')) ?? [];
@@ -2490,6 +2357,31 @@ const createDirector = ({ folium, host, store, settings, onChange }) => {
       await run(generation, { force: true, avoid: mode });
       return current.phase === 'applied' ? `已换成 ${nameOf(current.decision.mode)}` : current.message || current.phase;
     },
+    /** The user picked `mode` in the panel: it shows at once, becomes this song's choice and a taste record. */
+    chooseMode: async (mode) => {
+      if (!current) return '现在没有在播放的歌';
+      if (busy) return '正在决策中，请稍候';
+      if (!host.listModes().some((item) => item.id === mode)) return `现在没有这个模式：${mode}`;
+      const target = current;
+      const from = aiPickOf(target);
+      await ensureSnapshot();
+      host.setMode(mode); // marked as our own write, so onModeChanged does not count it twice
+      clearTimeout(settleTimer);
+      settleTimer = null;
+      target.userOverrode = true;
+      target.userMode = mode;
+      target.tasteRecorded = mode;
+      if (settings().remember) await store.saveUserChoice(target.key, mode).catch(() => {});
+      if (from !== mode) await remember(target, 'switch', { from, to: mode });
+      setPhase(target, 'user', `你换成了 ${nameOf(mode)}，本首不再自动切换`);
+      prepareNext();
+      busy = tuneManual(target, mode).finally(() => { busy = null; });
+      const tuned = await busy;
+      const notes = [];
+      if (tuned) notes.push('AI 已按这首歌调好参数');
+      if (from && from !== mode && settings().learnTaste) notes.push('已记进口味');
+      return `已换成 ${nameOf(mode)}${notes.length ? `，${notes.join('，')}` : ''}`;
+    },
     getTaste: () => ({ items: taste.items, summary: summaryText() }),
     clearTaste: async () => {
       taste = emptyTaste();
@@ -2512,6 +2404,12 @@ const createDirector = ({ folium, host, store, settings, onChange }) => {
 return { isSafeMoment, createDirector };
 })();
 
+// ---- src/evaluate.mjs
+const __evaluate = (() => {
+const createEvaluator = null;
+return { createEvaluator };
+})();
+
 // ---- src/panel.mjs
 const __panel = (() => {
 // The "AI 导演" player panel tab: what the director is doing for the song on
@@ -2530,6 +2428,7 @@ const PHASES = {
   applied: '已应用',
   remembered: '记忆命中',
   'user-memory': '沿用你的手动选择',
+  tuning: '调参数中',
   user: '你已手动接管',
   'no-key': '缺少密钥',
   'no-config': '还没设置好',
@@ -2554,7 +2453,7 @@ const CSS = `
   .ad .mode { font-size: 16px; font-weight: 600; }
   .ad .row { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
   .ad button { font: inherit; font-size: 12px; padding: 4px 10px; border-radius: 6px; cursor: pointer;
-    border: 1px solid currentColor; background: transparent; color: inherit; opacity: 0.85; }
+    border: 1px solid currentColor; background: transparent; color: inherit; opacity: 0.85; white-space: nowrap; }
   .ad button:hover { opacity: 1; }
   .ad table { border-collapse: collapse; width: 100%; font-size: 12px; }
   .ad td { padding: 2px 4px; vertical-align: top; }
@@ -2565,7 +2464,7 @@ const CSS = `
   .ad .bar { display: inline-block; height: 6px; border-radius: 3px; background: currentColor; opacity: 0.6; vertical-align: middle; }
 `;
 
-const mountPanel = (container, ctx, { director, folium, settings, onRender }) => {
+const mountPanel = (container, ctx, { director, evaluator, folium, settings, onRender }) => {
   const money = (value) => {
     const { priceIn, priceOut, currency } = settings();
     return priceIn + priceOut > 0 ? `，约 ${currency}${(value ?? 0).toFixed(4)}` : '';
@@ -2668,9 +2567,10 @@ const mountPanel = (container, ctx, { director, folium, settings, onRender }) =>
         view.append(el('div', nameOf(decision.mode), 'mode'));
         if (decision.reason) view.append(el('div', decision.reason));
         const applied = current.applied;
-        const params = applied?.written && Object.keys(applied.written).length > 0 ? applied.written : decision.params;
+        const ownApply = applied?.mode === decision.mode ? applied : null;
+        const params = ownApply?.written && Object.keys(ownApply.written).length > 0 ? ownApply.written : decision.params;
         if (params && Object.keys(params).length > 0) view.append(el('div', `参数：${JSON.stringify(params)}`, 'muted'));
-        const fx = applied?.fx && Object.keys(applied.fx).length > 0 ? applied.fx : decision.fx;
+        const fx = ownApply?.fx && Object.keys(ownApply.fx).length > 0 ? ownApply.fx : decision.fx;
         if (fx && Object.keys(fx).length > 0) {
           const text = Object.entries(fx)
             .map(([id, value]) => `${BEAT_EFFECTS[id]?.zh ?? id} ${value.on ? `开 ${value.strength ?? ''}`.trim() : '关'}`)
@@ -2686,6 +2586,15 @@ const mountPanel = (container, ctx, { director, folium, settings, onRender }) =>
         }
         for (const note of applied?.notes ?? []) view.append(el('div', `· ${note}`, 'muted'));
         if (decision.confidence) view.append(el('div', `把握 ${pct(decision.confidence)}`, 'muted'));
+        if (current.userMode && current.userMode !== decision.mode) {
+          view.append(el('h3', '你换成的模式'));
+          view.append(el('div', nameOf(current.userMode), 'mode'));
+          const tuned = current.tuned?.mode === current.userMode ? current.tuned : null;
+          if (tuned?.reason) view.append(el('div', tuned.reason));
+          const mine = applied?.mode === current.userMode && Object.keys(applied.written ?? {}).length > 0 ? applied.written : tuned?.params;
+          if (mine && Object.keys(mine).length > 0) view.append(el('div', `参数（AI 按这首歌调的）：${JSON.stringify(mine)}`, 'muted'));
+          else if (current.phase !== 'tuning') view.append(el('div', '参数：沿用这个模式现有的设置', 'muted'));
+        }
         if (current.tasteUsed) view.append(el('div', `参考了 ${current.tasteUsed} 条你在相似歌上的口味记录`, 'muted'));
         if (values.learnTaste && current.brief) {
           const verdict = el('div', '', 'row');
@@ -2722,14 +2631,19 @@ const mountPanel = (container, ctx, { director, folium, settings, onRender }) =>
       }
 
       if (current.ranked?.length) {
-        view.append(el('h3', '本地打分（前 5）'));
+        view.append(el('h3', '本地打分（前 5，不满意可以直接换）'));
+        const showing = current.userMode ?? current.decision?.mode;
         const table = el('table');
         for (const item of current.ranked.slice(0, 5)) {
           const tr = el('tr');
+          const pick = el('td');
+          if (item.id === showing) pick.append(el('span', '当前', 'muted'));
+          else pick.append(button('换成', () => director.chooseMode(item.id)));
           tr.append(
             el('td', nameOf(item.id)),
             el('td', item.score.toFixed(3)),
             el('td', [...item.why.fit.map((tag) => `+${tag}`), ...item.why.avoid.map((tag) => `−${tag}`)].join(' '), 'muted'),
+            pick,
           );
           table.append(tr);
         }
@@ -2787,10 +2701,10 @@ const mountPanel = (container, ctx, { director, folium, settings, onRender }) =>
   const evalActions = document.createElement('div');
   evalActions.className = 'row';
   evalActions.append(
-    button('运行评测', () => director.evaluate()),
-    button('重新理解后评测', () => director.evaluate({ rebrief: true })),
+    button('运行评测', () => evaluator.evaluate()),
+    button('重新理解后评测', () => evaluator.evaluate({ rebrief: true })),
     button('复制评测结果（JSON）', async () => {
-      const report = await director.getEvalReport();
+      const report = await evaluator.getReport();
       if (!report) return '还没有评测结果';
       await navigator.clipboard.writeText(JSON.stringify(report, null, 1));
       return '已复制到剪贴板';
@@ -2798,11 +2712,11 @@ const mountPanel = (container, ctx, { director, folium, settings, onRender }) =>
   );
   const renderEval = () => {
     evalBox.replaceChildren();
-    if (!settings().devTools) return;
+    if (!evaluator || !settings().devTools) return;
     evalBox.append(el('h3', '评测集（开发者）'), evalActions, evalOut);
-    const run = director.getEvalRun();
+    const run = evaluator.getRun();
     if (!run) {
-      evalOut.textContent = '用内置的 30 首歌跑一遍完整流程，对照人工标注算命中率。简报会缓存，第二次起只花第 2 步的钱。';
+      evalOut.textContent = '用内置的 42 首歌跑一遍完整流程，对照人工标注算命中率。简报会缓存，第二次起只花第 2 步的钱。';
       return;
     }
     const lines = [run.running ? `进行中 ${run.done}/${run.total}…` : ''];
@@ -2838,6 +2752,7 @@ return { mountPanel };
 const { createHostAdapter } = __host_adapter;
 const { createStore } = __store;
 const { createDirector } = __director;
+const { createEvaluator } = __evaluate;
 const { mountPanel } = __panel;
 const { PROVIDERS } = __providers;
 
@@ -2890,8 +2805,9 @@ const SETTINGS = [
   { key: 'priceIn', type: 'number', group: T('花费显示', 'Cost'), label: T('输入单价（每百万 token）', 'Input price per 1M tokens'),
     description: T('照服务商价格页填，只用于面板估算花费；填 0 只显示 token 数', 'From the price page of your provider; 0 shows tokens only'), defaultValue: 0, min: 0, max: 200, step: 0.01 },
   { key: 'priceOut', type: 'number', group: T('花费显示', 'Cost'), label: T('输出单价（每百万 token）', 'Output price per 1M tokens'), defaultValue: 0, min: 0, max: 400, step: 0.01 },
-  { key: 'devTools', type: 'boolean', group: T('开发者', 'Developer'), label: T('显示评测工具', 'Show evaluation tools'),
-    description: T('在面板里加“评测”一栏：用内置的 30 首歌跑一遍，看选择和人工标注对得上多少。一次约 60 次调用', 'Run the built-in 30-song evaluation; about 60 calls'), defaultValue: false },
+  // Only in a developer build (node dev/build.mjs --dev); the release has no evaluator.
+  ...(createEvaluator ? [{ key: 'devTools', type: 'boolean', group: T('开发者', 'Developer'), label: T('显示评测工具', 'Show evaluation tools'),
+    description: T('在面板和命令面板里加“评测”：用内置的 42 首歌跑一遍，看选择和人工标注对得上多少。一次约 60 次调用', 'Run the built-in 42-song evaluation; about 60 calls'), defaultValue: false }] : []),
 ];
 
 export default async function activate(folium) {
@@ -2925,7 +2841,7 @@ export default async function activate(folium) {
       currency: values.currency === 'USD' ? '$' : '¥',
       priceIn: Number(values.priceIn ?? 0),
       priceOut: Number(values.priceOut ?? 0),
-      devTools: values.devTools === true,
+      devTools: values.devTools === true && Boolean(createEvaluator),
     };
   };
 
@@ -2939,6 +2855,7 @@ export default async function activate(folium) {
     settings,
     onChange: () => renderers.forEach((render) => render()),
   });
+  const evaluator = createEvaluator?.({ folium, store, settings, ...director.forEvaluation() }) ?? null;
 
   folium.events.on('playback.songChanged', ({ song }) => director.onSongChanged(song));
   folium.events.on('lyrics.loaded', ({ song, lines }) => director.onLyricsLoaded(song, lines));
@@ -2952,6 +2869,7 @@ export default async function activate(folium) {
   section.settings.onChange(() => {
     director.onSetupChanged();
     director.onQueueChanged();
+    syncEvalCommand();
   });
 
   folium.registries.playerPanelTabs.register({
@@ -2960,6 +2878,7 @@ export default async function activate(folium) {
     order: 600,
     mount: (container, ctx) => mountPanel(container, ctx, {
       director,
+      evaluator,
       folium,
       settings,
       onRender: (render) => {
@@ -2986,7 +2905,17 @@ export default async function activate(folium) {
     if (!report.chat) return report.modelsError ? `获取模型失败：${report.modelsError}` : `连接正常，可用模型 ${report.models?.length ?? 0} 个，请在设置里填模型名`;
     return `连接正常：${report.chat.ms} ms${report.chat.thought ? '，但模型在“思考”，建议换一种关闭思考的方式' : ''}`;
   }, ['测试', '连接']);
-  command('evaluate', 'AI 导演 Plus：运行评测集', 'AI director Plus: run the evaluation set', () => director.evaluate(), ['评测', 'eval']);
+  // About 60 calls a run: listed only while the developer switch is on.
+  let evalCommand = null;
+  const syncEvalCommand = () => {
+    if (settings().devTools && !evalCommand) {
+      evalCommand = command('evaluate', 'AI 导演 Plus：运行评测集', 'AI director Plus: run the evaluation set', () => evaluator.evaluate(), ['评测', 'eval']);
+    } else if (!settings().devTools && evalCommand) {
+      evalCommand.unregister();
+      evalCommand = null;
+    }
+  };
+  syncEvalCommand();
   command('restore', 'AI 导演 Plus：恢复原来的设置', 'AI director Plus: restore my settings', () => director.restore(), ['恢复', '还原']);
   command('open', 'AI 导演 Plus：打开面板', 'AI director Plus: open panel', () => {
     folium.ui.openPlayerPanel(PANEL_ID);

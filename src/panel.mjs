@@ -14,6 +14,7 @@ const PHASES = {
   applied: '已应用',
   remembered: '记忆命中',
   'user-memory': '沿用你的手动选择',
+  tuning: '调参数中',
   user: '你已手动接管',
   'no-key': '缺少密钥',
   'no-config': '还没设置好',
@@ -38,7 +39,7 @@ const CSS = `
   .ad .mode { font-size: 16px; font-weight: 600; }
   .ad .row { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
   .ad button { font: inherit; font-size: 12px; padding: 4px 10px; border-radius: 6px; cursor: pointer;
-    border: 1px solid currentColor; background: transparent; color: inherit; opacity: 0.85; }
+    border: 1px solid currentColor; background: transparent; color: inherit; opacity: 0.85; white-space: nowrap; }
   .ad button:hover { opacity: 1; }
   .ad table { border-collapse: collapse; width: 100%; font-size: 12px; }
   .ad td { padding: 2px 4px; vertical-align: top; }
@@ -49,7 +50,7 @@ const CSS = `
   .ad .bar { display: inline-block; height: 6px; border-radius: 3px; background: currentColor; opacity: 0.6; vertical-align: middle; }
 `;
 
-export const mountPanel = (container, ctx, { director, folium, settings, onRender }) => {
+export const mountPanel = (container, ctx, { director, evaluator, folium, settings, onRender }) => {
   const money = (value) => {
     const { priceIn, priceOut, currency } = settings();
     return priceIn + priceOut > 0 ? `，约 ${currency}${(value ?? 0).toFixed(4)}` : '';
@@ -152,9 +153,10 @@ export const mountPanel = (container, ctx, { director, folium, settings, onRende
         view.append(el('div', nameOf(decision.mode), 'mode'));
         if (decision.reason) view.append(el('div', decision.reason));
         const applied = current.applied;
-        const params = applied?.written && Object.keys(applied.written).length > 0 ? applied.written : decision.params;
+        const ownApply = applied?.mode === decision.mode ? applied : null;
+        const params = ownApply?.written && Object.keys(ownApply.written).length > 0 ? ownApply.written : decision.params;
         if (params && Object.keys(params).length > 0) view.append(el('div', `参数：${JSON.stringify(params)}`, 'muted'));
-        const fx = applied?.fx && Object.keys(applied.fx).length > 0 ? applied.fx : decision.fx;
+        const fx = ownApply?.fx && Object.keys(ownApply.fx).length > 0 ? ownApply.fx : decision.fx;
         if (fx && Object.keys(fx).length > 0) {
           const text = Object.entries(fx)
             .map(([id, value]) => `${BEAT_EFFECTS[id]?.zh ?? id} ${value.on ? `开 ${value.strength ?? ''}`.trim() : '关'}`)
@@ -170,6 +172,15 @@ export const mountPanel = (container, ctx, { director, folium, settings, onRende
         }
         for (const note of applied?.notes ?? []) view.append(el('div', `· ${note}`, 'muted'));
         if (decision.confidence) view.append(el('div', `把握 ${pct(decision.confidence)}`, 'muted'));
+        if (current.userMode && current.userMode !== decision.mode) {
+          view.append(el('h3', '你换成的模式'));
+          view.append(el('div', nameOf(current.userMode), 'mode'));
+          const tuned = current.tuned?.mode === current.userMode ? current.tuned : null;
+          if (tuned?.reason) view.append(el('div', tuned.reason));
+          const mine = applied?.mode === current.userMode && Object.keys(applied.written ?? {}).length > 0 ? applied.written : tuned?.params;
+          if (mine && Object.keys(mine).length > 0) view.append(el('div', `参数（AI 按这首歌调的）：${JSON.stringify(mine)}`, 'muted'));
+          else if (current.phase !== 'tuning') view.append(el('div', '参数：沿用这个模式现有的设置', 'muted'));
+        }
         if (current.tasteUsed) view.append(el('div', `参考了 ${current.tasteUsed} 条你在相似歌上的口味记录`, 'muted'));
         if (values.learnTaste && current.brief) {
           const verdict = el('div', '', 'row');
@@ -206,14 +217,19 @@ export const mountPanel = (container, ctx, { director, folium, settings, onRende
       }
 
       if (current.ranked?.length) {
-        view.append(el('h3', '本地打分（前 5）'));
+        view.append(el('h3', '本地打分（前 5，不满意可以直接换）'));
+        const showing = current.userMode ?? current.decision?.mode;
         const table = el('table');
         for (const item of current.ranked.slice(0, 5)) {
           const tr = el('tr');
+          const pick = el('td');
+          if (item.id === showing) pick.append(el('span', '当前', 'muted'));
+          else pick.append(button('换成', () => director.chooseMode(item.id)));
           tr.append(
             el('td', nameOf(item.id)),
             el('td', item.score.toFixed(3)),
             el('td', [...item.why.fit.map((tag) => `+${tag}`), ...item.why.avoid.map((tag) => `−${tag}`)].join(' '), 'muted'),
+            pick,
           );
           table.append(tr);
         }
@@ -271,10 +287,10 @@ export const mountPanel = (container, ctx, { director, folium, settings, onRende
   const evalActions = document.createElement('div');
   evalActions.className = 'row';
   evalActions.append(
-    button('运行评测', () => director.evaluate()),
-    button('重新理解后评测', () => director.evaluate({ rebrief: true })),
+    button('运行评测', () => evaluator.evaluate()),
+    button('重新理解后评测', () => evaluator.evaluate({ rebrief: true })),
     button('复制评测结果（JSON）', async () => {
-      const report = await director.getEvalReport();
+      const report = await evaluator.getReport();
       if (!report) return '还没有评测结果';
       await navigator.clipboard.writeText(JSON.stringify(report, null, 1));
       return '已复制到剪贴板';
@@ -282,11 +298,11 @@ export const mountPanel = (container, ctx, { director, folium, settings, onRende
   );
   const renderEval = () => {
     evalBox.replaceChildren();
-    if (!settings().devTools) return;
+    if (!evaluator || !settings().devTools) return;
     evalBox.append(el('h3', '评测集（开发者）'), evalActions, evalOut);
-    const run = director.getEvalRun();
+    const run = evaluator.getRun();
     if (!run) {
-      evalOut.textContent = '用内置的 30 首歌跑一遍完整流程，对照人工标注算命中率。简报会缓存，第二次起只花第 2 步的钱。';
+      evalOut.textContent = '用内置的 42 首歌跑一遍完整流程，对照人工标注算命中率。简报会缓存，第二次起只花第 2 步的钱。';
       return;
     }
     const lines = [run.running ? `进行中 ${run.done}/${run.total}…` : ''];

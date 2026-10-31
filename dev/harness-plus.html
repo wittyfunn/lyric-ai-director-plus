@@ -64,6 +64,7 @@ let decisionReply = { mode: 'partita', params: { staggerMax: 150, showGuideLines
 let replyDelayMs = 50;
 
 const settingsValues = {};
+const settingsListeners = [];
 const folium = {
   modId: 'lyric-ai-director-plus',
   host: { folium: { major: 1, minor: 7 }, folia: '0.7.22' },
@@ -73,9 +74,9 @@ const folium = {
     registered[name].push(def);
     if (name === 'settingsSections') {
       for (const f of def.settings) if (f.type !== 'secret') settingsValues[f.key] = f.defaultValue;
-      return { id: def.id, unregister() {}, settings: { get: () => ({ ...settingsValues }), set: (p) => Object.assign(settingsValues, p), onChange: () => () => {} } };
+      return { id: def.id, unregister() {}, settings: { get: () => ({ ...settingsValues }), set: (p) => { Object.assign(settingsValues, p); settingsListeners.forEach((fn) => fn()); }, onChange: (fn) => { settingsListeners.push(fn); return () => {}; } } };
     }
-    return { id: def.id, unregister() {} };
+    return { id: def.id, unregister() { registered[name] = registered[name].filter((d) => d !== def); } };
   } }) }),
   events: { on: (type, fn) => { (handlers[type] ??= []).push(fn); return () => {}; } },
   ui: { toast: (m) => say('[toast]', m), openPlayerPanel: (id) => say('[openPanel]', id) },
@@ -270,8 +271,16 @@ state.smartBeat = { ...state.smartBeat, mode: 'on' };
 
 // 4g. M5: a manual switch that sticks becomes taste; 👎 picks another mode; a similar song is told
 await sleep(2100); // past the start-of-song grace, where switches are the host's
+decisionReply = { params: { staggerMax: 140, showGuideLines: false }, reason: '错落更开' };
+const beforeSettle = calls.length;
 state.handleSetVisualizerMode('partita'); // songI shows tempera, picked by the AI
 await sleep(8600);
+const tuneCall = calls[beforeSettle]?.body.messages ?? [];
+check('在 Folia 里手动换模式：停留后 AI 只为新模式调参数（1 次调用）并套用、记住',
+  calls.length - beforeSettle === 1 && tuneCall[0]?.content.includes('模式不能改') && tuneCall[1]?.content.includes('### partita')
+    && state.partitaTuning.staggerMax === 140 && JSON.parse(storage.get('song:netease:10')).u?.params?.staggerMax === 140,
+  JSON.stringify({ calls: calls.length - beforeSettle, partita: state.partitaTuning, u: JSON.parse(storage.get('song:netease:10')).u }));
+check('面板显示你换成的模式和 AI 调的参数', document.getElementById('panel').textContent.includes('你换成的模式') && document.getElementById('panel').textContent.includes('AI 按这首歌调的'));
 const tasteNow = () => JSON.parse(storage.get('taste') ?? '{"items":[]}').items;
 const switched = tasteNow().find((item) => item.k === 'netease:10');
 check('口味：手动换模式停留 8 秒后记成一条反馈', switched?.kind === 'switch' && switched.from === 'tempera' && switched.to === 'partita', JSON.stringify(switched));
@@ -293,6 +302,22 @@ const promptJ = calls[beforeJ + 1]?.body.messages[1].content ?? '';
 check('相似的歌：提示词带上口味示例', promptJ.includes('用户口味') && promptJ.includes('用户否掉了 云阶'), promptJ.slice(promptJ.indexOf('用户口味'), promptJ.indexOf('用户口味') + 80));
 check('面板说明参考了口味记录', /参考了 \d+ 条/.test(document.getElementById('panel').textContent));
 
+// 4h. the panel's local ranking: "换成" switches at once and counts as the user's choice and taste
+const swapButton = [...document.querySelectorAll('#panel button')].find((b) => b.textContent === '换成');
+decisionReply = { params: { staggerMax: 130, cameraIntensity: 1.6, breathingFloatMultiplier: 1.5, motionAmount: 1.3, typographyMotion: 1.4 }, reason: '调参' };
+const beforeSwap = calls.length;
+swapButton?.click();
+await sleep(600);
+const entryJ = JSON.parse(storage.get('song:netease:11') ?? '{}');
+const tasteJ = JSON.parse(storage.get('taste')).items.find((item) => item.k === 'netease:11');
+check('面板「换成」：立刻切换、记成这首的选择和口味，只花 1 次调用调参数',
+  state.visualizerMode !== 'fume' && entryJ.u?.mode === state.visualizerMode && tasteJ?.kind === 'switch' && tasteJ.from === 'fume' && tasteJ.to === state.visualizerMode && calls.length - beforeSwap === 1,
+  JSON.stringify({ mode: state.visualizerMode, u: entryJ.u, taste: tasteJ }));
+check('面板标出当前模式', document.getElementById('panel').textContent.includes('当前'));
+startSong(songA);
+await sleep(600);
+check('记忆命中的歌也显示本地打分', document.getElementById('panel').textContent.includes('本地打分'));
+
 // 5. missing key
 secrets.delete('apiKey');
 const songD = { id: '4', source: 'netease', title: '无密钥', artist: 'x', album: null, ref: 'd' };
@@ -309,7 +334,17 @@ check('恢复：参数也回到原值', state.partitaTuning.staggerMax === 80 &&
 
 const stats = JSON.parse(storage.get('stats'));
 check('花费累计：没填单价时只计 token、不算钱', stats.calls >= 4 && stats.input > 0 && stats.cost === 0, JSON.stringify(stats));
+check('评测命令默认不出现（开发者开关关着，或者是发布版）', !registered.commands.some((c) => c.id === 'evaluate'));
+if (registered.settingsSections[0].settings.some((f) => f.key === 'devTools')) { // developer build only
+  const section = registered.settingsSections[0];
+  const handle = { set: (p) => { Object.assign(settingsValues, p); settingsListeners.forEach((fn) => fn()); } };
+  handle.set({ devTools: true });
+  const shown = registered.commands.some((c) => c.id === 'evaluate');
+  handle.set({ devTools: false });
+  check('开发版：打开开发者开关才出现评测命令，关掉就撤掉', shown && !registered.commands.some((c) => c.id === 'evaluate'));
+}
 window.__results = results;
+window.__registered = registered;
 window.__panel = document.getElementById('panel').textContent;
 say('DONE', `${results.filter((r) => r.ok).length}/${results.length}`);
 </script>
