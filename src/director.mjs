@@ -523,7 +523,7 @@ export const createDirector = ({ folium, host, store, settings, onChange }) => {
       userOverrode: false,
     } : null;
     if (!current) return emit();
-    if (!host.available()) return setPhase(current, 'error', '宿主内部接口不可用：确认模组 folia 版本范围与当前 Folia 匹配');
+    if (!host.available()) return setPhase(current, 'error', '这个版本的 Folia 没有 folium.visualizer：需要 Folium 1.8 或更新');
 
     // The next-song job may be working on this very song: wait for it rather than pay twice.
     if (next?.key === key && next.promise) {
@@ -555,8 +555,13 @@ export const createDirector = ({ folium, host, store, settings, onChange }) => {
     run(gen, {});
   };
 
-  const onModeChanged = (mode) => {
-    if (!current || host.isOwnWrite()) return;
+  const onModeChanged = (mode, origin) => {
+    if (!current || host.isOwnWrite(origin)) return;
+    if (origin?.kind === 'mod') { // another mod took over: step back, but it is not the user's taste
+      current.userOverrode = true;
+      setPhase(current, 'user', `模组 ${origin.modId} 换成了 ${PROFILES[mode]?.name ?? mode}，本首不再自动切换`);
+      return;
+    }
     if (performance.now() - current.startedAt < USER_CHANGE_GRACE_MS) return;
     current.userOverrode = true;
     current.userMode = mode;
@@ -678,7 +683,7 @@ export const createDirector = ({ folium, host, store, settings, onChange }) => {
     restore: async () => {
       const saved = await store.get('snapshot');
       if (!saved) return '还没有改动过你的设置';
-      host.restore(saved);
+      await host.restore(saved);
       await store.set('snapshot', null);
       if (current) current.userOverrode = true; // do not switch again for this song
       return '已恢复原来的模式与参数';

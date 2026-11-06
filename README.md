@@ -27,7 +27,7 @@ Folia 的模组：让 AI 先读懂一首歌的情绪、意象和起伏，再为�
 - **模组市场**：在 Folia 的模组市场里搜索“AI 歌词动画导演 Plus”。
 - **手动安装**：下载 Release 里的 `lyric-ai-director-plus-<版本>.zip`，拖进 Folia 的“设置 → 模组”。
 
-需要 Folia 0.7.22 及以上的 0.7.x 版本。
+需要带 Folium 1.8 的 Folia（0.7.26 起）。
 
 ## 设置
 
@@ -73,8 +73,11 @@ Folia 的模组：让 AI 先读懂一首歌的情绪、意象和起伏，再为�
 |---|---|
 | `net.fetch` | 调用你配置的 AI 接口（以及“测试连接”时读取模型列表）。不访问其他地址 |
 | `filesystem.data` | 在模组自己的数据目录里保存记忆、口味记录和用量 |
+| `visualizer.mode` | 切换歌词动画模式（Folium 1.8 的 `folium.visualizer.setMode`） |
+| `visualizer.tuning` | 调整内置模式的样式参数（`setTuning`，画质类设置 Folia 不开放） |
+| `visualizer.beatEffects` | 开关当前模式的智能动感效果、调强度（`setBeatEffects`；智能动感的总开关插件改不了） |
 
-插件还用到了 Folia 的**内部接口**（`folium.internals`），用来读取和切换歌词动画模式、调整模式参数和智能动感效果，因为公开接口里还没有这些能力。所以 Folia 的模组面板会标出“使用内部接口”，`mod.json` 也把兼容版本限定在 0.7.x。Folium 2 会去掉内部接口，到时需要更新插件。
+全部通过 Folium 1.8 的公开接口 `folium.visualizer` 完成，不使用 Folia 的内部接口。插件只在你没有手动接管时写入，每首歌最多切一次模式、写一次参数；你在播放页手动换模式后，它会让步并记住你的选择。
 
 ## 开发
 

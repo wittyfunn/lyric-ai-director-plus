@@ -64,8 +64,8 @@ const SETTINGS = [
 ];
 
 export default async function activate(folium) {
-  if ((folium.host?.folium?.minor ?? 0) < 7) {
-    folium.ui.toast('AI 歌词动画导演 Plus 需要 Folium 1.7（Folia 0.7.22）或更新版本', { type: 'error' });
+  if ((folium.host?.folium?.minor ?? 0) < 8) {
+    folium.ui.toast('AI 歌词动画导演 Plus 需要 Folium 1.8 或更新版本的 Folia', { type: 'error' });
     return undefined;
   }
 
@@ -113,7 +113,7 @@ export default async function activate(folium) {
   folium.events.on('playback.songChanged', ({ song }) => director.onSongChanged(song));
   folium.events.on('lyrics.loaded', ({ song, lines }) => director.onLyricsLoaded(song, lines));
   folium.events.on('theme.changed', ({ theme }) => director.onThemeChanged(theme));
-  folium.events.on('visualizer.modeChanged', ({ mode }) => director.onModeChanged(mode));
+  folium.events.on('visualizer.modeChanged', ({ mode, origin }) => director.onModeChanged(mode, origin));
   folium.events.on('playback.queueChanged', () => director.onQueueChanged());
   folium.events.on('playback.loopModeChanged', () => director.onQueueChanged());
   folium.secrets.subscribe((key) => {

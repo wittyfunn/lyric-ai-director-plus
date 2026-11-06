@@ -24,7 +24,8 @@ const emit = (type, payload) => (handlers[type] ?? []).forEach((fn) => fn(payloa
 // visualizer store
 const state = {
   visualizerMode: 'tilt',
-  handleSetVisualizerMode(mode) { state.visualizerMode = mode; emit('visualizer.modeChanged', { mode }); },
+  // The user picking a mode in the player.
+  handleSetVisualizerMode(mode) { state.visualizerMode = mode; emit('visualizer.modeChanged', { mode, origin: { kind: 'user', modId: null } }); },
   smartBeat: { mode: 'on', effects: {} },
   handleSetSmartBeat(patch) {
     const effects = { ...state.smartBeat.effects };
@@ -39,10 +40,45 @@ for (const mode of ['classic', 'cadenza', 'partita', 'fume', 'claddagh', 'cappel
 }
 const registry = ['sonnet', 'tempera', 'lumiere', 'hanabi', 'classic', 'cadenza', 'partita', 'fume', 'tilt', 'claddagh', 'monet', 'pendolo', 'cappella', 'diorama', 'still', 'mod:visualizer52hz:rings']
   .map((mode) => ({ mode, labelFallback: mode }));
-const beatEffectsOf = { tempera: ['tempera.inkFlash'], sonnet: ['sonnet.lensTear'], pendolo: ['pendolo.drumhead', 'pendolo.gearBeats'] };
-for (const entry of registry) {
-  if (beatEffectsOf[entry.mode]) entry.beatEffects = beatEffectsOf[entry.mode].map((id) => ({ id, source: 'beats', retired: id === 'pendolo.gearBeats' }));
-}
+const beatEffectsOf = { tempera: ['tempera.inkFlash'], sonnet: ['sonnet.lensTear'], pendolo: ['pendolo.drumhead'] };
+
+// Folium 1.8 folium.visualizer over the same state: what each builtin mode lets mods write.
+const NUMBER_KEYS = { staggerMin: [0, 180], staggerMax: [0, 180], cameraIntensity: [0, 2], mgDensity: [0, 2], radiusScale: [0.5, 2], depthOfField: [0, 2], breathingFloatMultiplier: [0, 2], motionAmount: [0, 2], typographyMotion: [0, 2] };
+const BOOLEAN_KEYS = ['showGuideLines', 'showOnlyText', 'showBackgroundMg'];
+const tuningInfo = (mode) => (state[`${mode}Tuning`] ? {
+  ...Object.fromEntries(Object.entries(NUMBER_KEYS).map(([key, [min, max]]) => [key, { type: 'number', min, max, step: null, defaultValue: min }])),
+  ...Object.fromEntries(BOOLEAN_KEYS.map((key) => [key, { type: 'boolean', defaultValue: false }])),
+} : {});
+const tuningView = (mode) => Object.fromEntries(Object.keys(tuningInfo(mode)).filter((key) => key in state[`${mode}Tuning`]).map((key) => [key, state[`${mode}Tuning`][key]]));
+const effectsView = () => ({
+  smartBeat: state.smartBeat.mode,
+  effects: Object.entries(beatEffectsOf).flatMap(([mode, ids]) => ids.map((id) => ({ id, mode, on: state.smartBeat.effects[id]?.on ?? true, strength: state.smartBeat.effects[id]?.strength ?? 1, parts: {} }))),
+});
+const visualizer = {
+  listModes: () => registry.map(({ mode }) => ({ id: mode, label: mode, kind: mode.startsWith('mod:') ? 'mod' : 'builtin', tuning: tuningInfo(mode), beatEffects: (beatEffectsOf[mode] ?? []).map((id) => ({ id, mode, label: id, source: 'beats', parts: [] })) })),
+  getMode: () => state.visualizerMode,
+  setMode: (id) => {
+    if (!registry.some((entry) => entry.mode === id)) throw new TypeError(`invalid-arguments: ${id}`);
+    if (state.visualizerMode !== id) { state.visualizerMode = id; emit('visualizer.modeChanged', { mode: id, origin: { kind: 'mod', modId: folium.modId } }); }
+    return { ok: true, mode: id };
+  },
+  getTuning: (mode) => tuningView(mode),
+  setTuning: (mode, patch) => {
+    const info = tuningInfo(mode);
+    for (const [key, value] of Object.entries(patch)) {
+      if (info[key]?.type === 'number' && typeof value !== 'number') throw new TypeError(`invalid-arguments: ${key}`);
+      if (info[key]?.type === 'boolean' && typeof value !== 'boolean') throw new TypeError(`invalid-arguments: ${key}`);
+    }
+    const kept = Object.fromEntries(Object.entries(patch).filter(([key]) => info[key]).map(([key, value]) => [key, info[key].type === 'number' ? Math.min(info[key].max, Math.max(info[key].min, value)) : value]));
+    state[`${mode}Tuning`] = { ...state[`${mode}Tuning`], ...kept };
+    return { ok: true, tuning: tuningView(mode), ignored: Object.keys(patch).filter((key) => !info[key]) };
+  },
+  getBeatEffects: effectsView,
+  setBeatEffects: (patch) => {
+    state.handleSetSmartBeat({ effects: patch });
+    return { ok: true, state: effectsView(), ignored: [] };
+  },
+};
 
 // playback
 const songA = { id: '1', source: 'netease', title: '真的吗', artist: '莫文蔚', album: '精选', ref: 'a' };
@@ -67,7 +103,8 @@ const settingsValues = {};
 const settingsListeners = [];
 const folium = {
   modId: 'lyric-ai-director-plus',
-  host: { folium: { major: 1, minor: 7 }, folia: '0.7.22' },
+  host: { folium: { major: 1, minor: 8 }, folia: '0.7.26' },
+  visualizer,
   log: { info: (...a) => say('[info]', ...a), warn: (...a) => say('[warn]', ...a), error: (...a) => say('[error]', ...a) },
   registries: new Proxy({}, { get: (_, name) => ({ register: (def) => {
     registered[name] = registered[name] ?? [];
@@ -114,9 +151,11 @@ const folium = {
       return { ok: true, status: 200, statusText: 'OK', headers: {}, text: () => JSON.stringify(data), json: () => data };
     },
   },
-  get internals() { return { stores: { visualizerSettings: { getState: () => state } }, visualizerRegistry: { entries: registry } }; },
+  // The mod must not reach into the host any more (Folium 1.8 public API only).
+  get internals() { internalsTouched = true; throw new Error('folium.internals used'); },
 };
 const registered = {};
+let internalsTouched = false;
 
 const results = [];
 const check = (name, ok, detail = '') => { results.push({ name, ok, detail }); say(ok ? 'PASS' : 'FAIL', name, detail); };
@@ -318,6 +357,19 @@ startSong(songA);
 await sleep(600);
 check('记忆命中的歌也显示本地打分', document.getElementById('panel').textContent.includes('本地打分'));
 
+// 4i. another mod switches the mode: we step back, but it is not the user's taste or choice
+const songK = { id: '12', source: 'netease', title: '别的模组', artist: 'x', album: null, ref: 'k' };
+decisionReply = { mode: 'monet', params: {}, reason: '测试', confidence: 0.7 };
+startSong(songK);
+await waitFor(() => state.visualizerMode === 'monet', 6000);
+await sleep(2100);
+const tasteBeforeK = storage.get('taste');
+state.visualizerMode = 'claddagh';
+emit('visualizer.modeChanged', { mode: 'claddagh', origin: { kind: 'mod', modId: 'other-mod' } });
+await sleep(8600);
+check('别的模组换模式：插件让步，但不记成你的选择和口味',
+  document.getElementById('panel').textContent.includes('模组 other-mod 换成了') && !JSON.parse(storage.get('song:netease:12')).u && storage.get('taste') === tasteBeforeK);
+
 // 5. missing key
 secrets.delete('apiKey');
 const songD = { id: '4', source: 'netease', title: '无密钥', artist: 'x', album: null, ref: 'd' };
@@ -343,6 +395,7 @@ if (registered.settingsSections[0].settings.some((f) => f.key === 'devTools')) {
   handle.set({ devTools: false });
   check('开发版：打开开发者开关才出现评测命令，关掉就撤掉', shown && !registered.commands.some((c) => c.id === 'evaluate'));
 }
+check('全程没有碰 folium.internals，只用公开接口', !internalsTouched);
 window.__results = results;
 window.__registered = registered;
 window.__panel = document.getElementById('panel').textContent;
